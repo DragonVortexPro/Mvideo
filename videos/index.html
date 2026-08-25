@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Gallery</title>
+  <style>
+    :root {
+      --bg: #0f0f0f;
+      --card: #1a1a1a;
+      --text: #e0e0e0;
+      --muted: #888;
+      --accent: #3b82f6;
+      --border: #2a2a2a;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.5;
+    }
+    header {
+      padding: 24px 20px;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+      background: #111;
+    }
+    h1 { font-size: 1.8rem; margin-bottom: 8px; }
+    .subtitle { color: var(--muted); font-size: 0.95rem; }
+    .controls {
+      max-width: 1200px;
+      margin: 24px auto;
+      padding: 0 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+    #search {
+      flex: 1;
+      min-width: 220px;
+      padding: 12px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      font-size: 1rem;
+    }
+    .filters { display: flex; flex-wrap: wrap; gap: 8px; }
+    .filter-btn {
+      padding: 8px 14px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: 0.2s;
+    }
+    .filter-btn.active, .filter-btn:hover {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+    .grid {
+      max-width: 1200px;
+      margin: 0 auto 60px;
+      padding: 0 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 20px;
+    }
+    .card {
+      background: var(--card);
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 24px rgba(0,0,0,0.4);
+    }
+    .thumb {
+      aspect-ratio: 16/9;
+      background: #111;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .no-thumb { color: var(--muted); font-size: 0.9rem; }
+    .info { padding: 14px; }
+    .platform {
+      font-size: 0.75rem;
+      color: var(--accent);
+      font-weight: 600;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+    h3 {
+      font-size: 1rem;
+      margin-bottom: 12px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .btn {
+      display: inline-block;
+      padding: 6px 10px;
+      background: #222;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.8rem;
+      transition: 0.15s;
+    }
+    .btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
+    .empty { text-align: center; padding: 80px 20px; color: var(--muted); }
+    footer {
+      text-align: center;
+      padding: 30px;
+      color: var(--muted);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Video Gallery</h1>
+    <div class="subtitle">Downloaded videos • Auto updated</div>
+  </header>
+
+  <div class="controls">
+    <input type="text" id="search" placeholder="Search videos...">
+    <div class="filters">
+      <button class="filter-btn active" data-filter="all">All</button>
+      <button class="filter-btn" data-filter="YouTube">YouTube</button>
+      <button class="filter-btn" data-filter="TikTok">TikTok</button>
+      <button class="filter-btn" data-filter="Instagram">Instagram</button>
+      <button class="filter-btn" data-filter="Twitter">Twitter</button>
+      <button class="filter-btn" data-filter="Aparat">Aparat</button>
+      <button class="filter-btn" data-filter="Vimeo">Vimeo</button>
+      <button class="filter-btn" data-filter="Other">Other</button>
+    </div>
+  </div>
+
+  <div class="grid" id="grid">
+    <div class="empty">No videos yet. Run the workflow to add some.</div>
+  </div>
+
+  <footer>
+    Last updated: 2026-08-25 06:58 UTC • Powered by GitHub Actions
+  </footer>
+
+  <script>
+    const search = document.getElementById('search');
+    const buttons = document.querySelectorAll('.filter-btn');
+    const cards = document.querySelectorAll('.card');
+    let currentFilter = 'all';
+
+    function filter() {
+      const q = search.value.toLowerCase().trim();
+      cards.forEach(card => {
+        const name = card.dataset.name;
+        const platform = card.dataset.platform;
+        const matchFilter = currentFilter === 'all' || platform === currentFilter;
+        const matchSearch = !q || name.includes(q);
+        card.style.display = (matchFilter && matchSearch) ? '' : 'none';
+      });
+    }
+
+    search.addEventListener('input', filter);
+    buttons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        buttons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentFilter = btn.dataset.filter;
+        filter();
+      });
+    });
+  </script>
+</body>
+</html>
