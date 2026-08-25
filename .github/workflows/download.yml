@@ -1,37 +1,25 @@
-name: Multi-Site Downloader + Gallery
+name: YouTube Downloader
 
 on:
   workflow_dispatch:
     inputs:
       video_urls:
-        description: "Video or Playlist URLs (space separated) - YouTube, TikTok, Instagram, Twitter, Aparat, Vimeo..."
+        description: "YouTube URLs (separate multiple links with space)"
         required: true
         type: string
       quality:
         description: "Quality"
         required: false
-        default: "best"
+        default: "1080"
         type: choice
         options:
           - best
-          - 2160
-          - 1440
           - 1080
           - 720
           - 480
           - audio
-      download_subtitles:
-        description: "Download subtitles"
-        required: false
-        default: false
-        type: boolean
-      playlist_as_zip:
-        description: "Zip entire playlist"
-        required: false
-        default: true
-        type: boolean
       password:
-        description: "Zip password (optional)"
+        description: "Zip password (optional - leave empty for no password)"
         required: false
         default: ""
         type: string
@@ -39,7 +27,7 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 180
     permissions:
       contents: write
       pages: write
@@ -48,477 +36,253 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
-
-      - name: Configure Git
-        run: |
-          git config --global http.postBuffer 524288000
-          git config --global core.compression 0
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
 
       - name: Start WARP
         run: |
           docker network create warp-net || true
           docker run -d --name warp --restart=always --network warp-net \
-            -p 1080:1080 --cap-add NET_ADMIN \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
             --sysctl net.ipv6.conf.all.disable_ipv6=0 \
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
             -v warp-data:/var/lib/cloudflare-warp \
             caomingjun/warp
+
+          echo "Waiting for WARP..."
           for i in {1..10}; do
-            if curl -s --max-time 4 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace | grep -qE "warp=(on|plus)"; then
-              echo "WARP ready"
+            if curl -s --max-time 4 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -qE "warp=(on|plus)"; then
+              echo "WARP is ready"
               break
             fi
+            echo "Attempt $i..."
             sleep 3
           done
 
-      - name: Setup yt-dlp
+      - name: Setup yt-dlp + ffmpeg
         uses: AnimMouse/setup-yt-dlp@v3
         with:
           ffmpeg: true
           aria2: true
 
       - name: Install tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq zip p7zip-full jq bc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zip p7zip-full
 
       - name: Download Videos
         env:
           URLS: ${{ github.event.inputs.video_urls }}
           QUALITY: ${{ github.event.inputs.quality }}
           PASSWORD: ${{ github.event.inputs.password }}
-          SUBS: ${{ github.event.inputs.download_subtitles }}
-          PLAYLIST_ZIP: ${{ github.event.inputs.playlist_as_zip }}
-          OWNER: ${{ github.repository_owner }}
-          REPO: ${{ github.event.repository.name }}
-          BRANCH: ${{ github.ref_name }}
         run: |
-          set -e
-          mkdir -p videos /tmp/backup
-          SPLIT_MB=45
-          SPLIT_BYTES=$((SPLIT_MB * 1024 * 1024))
+          mkdir -p videos
 
           case "$QUALITY" in
-            audio) FORMAT="bestaudio/bestaudio*/best" ;;
-            2160)  FORMAT="bestvideo[height<=2160]+bestaudio/best" ;;
-            1440)  FORMAT="bestvideo[height<=1440]+bestaudio/best" ;;
-            1080)  FORMAT="bestvideo[height<=1080]+bestaudio/best" ;;
-            720)   FORMAT="bestvideo[height<=720]+bestaudio/best" ;;
-            480)   FORMAT="bestvideo[height<=480]+bestaudio/best" ;;
-            *)     FORMAT="bestvideo+bestaudio/best" ;;
+            audio)  FORMAT="bestaudio/best" ;;
+            1080)   FORMAT="bestvideo[height<=1080]+bestaudio/best" ;;
+            720)    FORMAT="bestvideo[height<=720]+bestaudio/best" ;;
+            480)    FORMAT="bestvideo[height<=480]+bestaudio/best" ;;
+            *)      FORMAT="bestvideo+bestaudio/best" ;;
           esac
 
-          COMMON=(
-            --proxy "socks5://127.0.0.1:1080"
-            --downloader aria2c
-            --downloader-args "aria2c:-x 16 -s 16 -k 1M"
-            --concurrent-fragments 8
-            --retries 10
-            --fragment-retries 10
-            --no-part
-            --no-cache-dir
-            --write-thumbnail
-            --convert-thumbnails jpg
-            --merge-output-format mp4
-            --progress --newline
-          )
-
-          [ "$QUALITY" = "audio" ] && COMMON+=(--extract-audio --audio-format mp3 --audio-quality 0)
-
-          sanitize() {
-            echo "$1" | sed 's/[ /　]/-/g' | tr -s '-' | sed 's/[^a-zA-Z0-9._-]//g' | cut -c1-70
-          }
-
-          urlencode() {
-            python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
-          }
-
-          METHODS=(
-            "--extractor-args youtube:player_client=android"
-            "--extractor-args youtube:player_client=web"
-            "--extractor-args youtube:player_client=mweb"
-          )
-
           read -ra URL_LIST <<< "$URLS"
-          IDX=0
+          echo "Total links: ${#URL_LIST[@]}"
 
-          for RAW in "${URL_LIST[@]}"; do
-            IDX=$((IDX+1))
-            URL="$RAW"
-            echo "==== [$IDX/${#URL_LIST[@]}] $URL ===="
+          for URL in "${URL_LIST[@]}"; do
+            echo "========================================"
+            echo "Downloading: $URL"
+            echo "========================================"
 
-            IS_PLAYLIST=false
-            [[ "$URL" == *list=* || "$URL" == */playlist* ]] && IS_PLAYLIST=true
-
-            TMP="tmp_$IDX"
-            mkdir -p "$TMP"
-            OK=false
-
-            for M in "${METHODS[@]}"; do
-              if [ "$IS_PLAYLIST" = true ]; then
-                yt-dlp "${COMMON[@]}" --format "$FORMAT" $M --yes-playlist \
-                  -o "$TMP/%(playlist_index)03d - %(title)s.%(ext)s" "$URL" && OK=true && break
-              else
-                yt-dlp "${COMMON[@]}" --format "$FORMAT" $M --no-playlist \
-                  -o "$TMP/%(title)s.%(ext)s" "$URL" && OK=true && break
-              fi
-              sleep 2
-            done
-
-            [ "$OK" = false ] && { echo "Failed"; rm -rf "$TMP"; continue; }
-
-            if [ "$IS_PLAYLIST" = true ]; then
-              TITLE=$(yt-dlp --proxy socks5://127.0.0.1:1080 --print "%(playlist_title)s" --playlist-items 1 --skip-download "$URL" 2>/dev/null | head -1)
-              [ -z "$TITLE" ] && TITLE="Playlist_$IDX"
-            else
-              TITLE=$(basename "$(find "$TMP" -type f \( -name "*.mp4" -o -name "*.webm" -o -name "*.mkv" -o -name "*.mp3" \) | head -1)" | sed 's/\.[^.]*$//')
-            fi
-
-            BASE=$(sanitize "$TITLE")
-            DEST="/tmp/backup/$BASE"
-            mkdir -p "$DEST"
-
-            find "$TMP" -type f \( -name "*.mp4" -o -name "*.webm" -o -name "*.mkv" -o -name "*.mp3" -o -name "*.jpg" \) -exec mv {} "$DEST/" \;
-
-            # Subtitles
-            if [ "$SUBS" = "true" ]; then
-              mkdir -p "$DEST/subs"
-              yt-dlp --proxy socks5://127.0.0.1:1080 --write-sub --write-auto-sub --sub-langs "fa,en" \
-                --sub-format vtt --convert-subs vtt --skip-download \
-                -o "$DEST/subs/%(title)s" $([ "$IS_PLAYLIST" = true ] && echo --yes-playlist || echo --no-playlist) "$URL" || true
-              if ls "$DEST/subs"/*.{vtt,srt} 1>/dev/null 2>&1; then
-                (cd "$DEST/subs" && zip -j ../subtitle.zip ./*)
-                rm -rf "$DEST/subs"
-              fi
-            fi
-
-            # Zip playlist or split large files
-            if [ "$IS_PLAYLIST" = true ] && [ "$PLAYLIST_ZIP" = "true" ]; then
-              cd "$DEST"
-              if [ -n "$PASSWORD" ]; then
-                7z a -tzip -p"$PASSWORD" -mx=0 "../${BASE}.zip" ./*
-              else
-                zip -0 -r "../${BASE}.zip" ./*
-              fi
-              cd /tmp/backup
-              rm -rf "$BASE"
-              mkdir -p "$BASE"
-              mv "${BASE}.zip" "$BASE/"
-            else
-              for F in "$DEST"/*; do
-                [ -f "$F" ] || continue
-                [[ "$F" == *.jpg || "$F" == *.zip ]] && continue
-                SIZE=$(stat -c%s "$F")
-                if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
-                  BN=$(basename "$F")
-                  NAME="${BN%.*}"
-                  if [ -n "$PASSWORD" ]; then
-                    7z a -tzip -v${SPLIT_MB}m -p"$PASSWORD" -mx=0 "$DEST/${NAME}.zip" "$F"
-                  else
-                    zip -0 -s ${SPLIT_MB}m "$DEST/${NAME}.zip" "$F"
-                  fi
-                  rm -f "$F"
-                fi
-              done
-            fi
-
-            # Simple README
-            {
-              echo "# $BASE"
-              echo ""
-              echo "- Original: $URL"
-              echo "- Quality: $QUALITY"
-              [ -n "$PASSWORD" ] && echo "- Password protected: Yes"
-            } > "$DEST/README.md"
-
-            rm -rf "$TMP"
-            echo "Done → $BASE"
+            yt-dlp \
+              --proxy "socks5://127.0.0.1:1080" \
+              --format "$FORMAT" \
+              --merge-output-format mp4 \
+              --write-thumbnail \
+              --convert-thumbnails jpg \
+              --output "videos/%(title)s.%(ext)s" \
+              --no-playlist \
+              --retries 10 \
+              --fragment-retries 10 \
+              --downloader aria2c \
+              --downloader-args "aria2c:-x 16 -s 16" \
+              "$URL" || echo "Failed: $URL"
           done
 
-          echo "/tmp/backup" > /tmp/backup_path.txt
+          # Zip with password if provided
+          if [ -n "$PASSWORD" ]; then
+            echo "Creating password protected zips..."
+            cd videos
+            for f in *.mp4 *.webm *.mkv *.mp3; do
+              [ -f "$f" ] || continue
+              zip -P "$PASSWORD" "${f%.*}.zip" "$f"
+              rm -f "$f"
+            done
+            cd ..
+          fi
 
-      - name: Generate Gallery HTML
-        run: |
-          BACKUP=$(cat /tmp/backup_path.txt)
-          mkdir -p videos
-          cp -r "$BACKUP"/* videos/ 2>/dev/null || true
-
-          python3 << 'EOF'
-          import os, json, html
-          from pathlib import Path
-          from datetime import datetime
-
-          videos_dir = Path("videos")
-          items = []
-
-          for folder in sorted(videos_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-              if not folder.is_dir():
-                  continue
-              name = folder.name
-              thumb = None
-              files = []
-              for f in folder.iterdir():
-                  if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]:
-                      thumb = f.name
-                  elif f.suffix.lower() in [".mp4", ".webm", ".mkv", ".mp3", ".zip"] or ".z" in f.suffix.lower():
-                      files.append(f.name)
-
-              if not files:
-                  continue
-
-              platform = "Other"
-              lower = name.lower()
-              if "youtube" in lower or "youtu" in lower: platform = "YouTube"
-              elif "tiktok" in lower: platform = "TikTok"
-              elif "instagram" in lower or "insta" in lower: platform = "Instagram"
-              elif "twitter" in lower or "x.com" in lower: platform = "Twitter"
-              elif "aparat" in lower: platform = "Aparat"
-              elif "vimeo" in lower: platform = "Vimeo"
-
-              items.append({
-                  "name": name,
-                  "thumb": thumb,
-                  "files": files,
-                  "platform": platform,
-                  "mtime": folder.stat().st_mtime
-              })
-
-          # Generate HTML
-          cards = ""
-          for item in items:
-              thumb_html = f'<img src="{html.escape(item["name"])}/{html.escape(item["thumb"])}" alt="thumb" loading="lazy">' if item["thumb"] else '<div class="no-thumb">No Image</div>'
-              files_html = "".join([f'<a class="btn" href="{html.escape(item["name"])}/{html.escape(f)}" download>{html.escape(f)}</a>' for f in item["files"][:6]])
-              cards += f'''
-              <div class="card" data-platform="{item["platform"]}" data-name="{html.escape(item["name"].lower())}">
-                <div class="thumb">{thumb_html}</div>
-                <div class="info">
-                  <div class="platform">{item["platform"]}</div>
-                  <h3 title="{html.escape(item["name"])}">{html.escape(item["name"][:60])}</h3>
-                  <div class="actions">{files_html}</div>
-                </div>
-              </div>'''
-
-          html_content = f'''<!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Video Gallery</title>
-            <style>
-              :root {{
-                --bg: #0f0f0f;
-                --card: #1a1a1a;
-                --text: #e0e0e0;
-                --muted: #888;
-                --accent: #3b82f6;
-                --border: #2a2a2a;
-              }}
-              * {{ margin:0; padding:0; box-sizing:border-box; }}
-              body {{
-                background: var(--bg);
-                color: var(--text);
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                line-height: 1.5;
-              }}
-              header {{
-                padding: 24px 20px;
-                text-align: center;
-                border-bottom: 1px solid var(--border);
-                background: #111;
-              }}
-              h1 {{ font-size: 1.8rem; margin-bottom: 8px; }}
-              .subtitle {{ color: var(--muted); font-size: 0.95rem; }}
-              .controls {{
-                max-width: 1200px;
-                margin: 24px auto;
-                padding: 0 16px;
-                display: flex;
-                flex-wrap: wrap;
-                gap: 12px;
-                align-items: center;
-              }}
-              #search {{
-                flex: 1;
-                min-width: 220px;
-                padding: 12px 16px;
-                border-radius: 10px;
-                border: 1px solid var(--border);
-                background: var(--card);
-                color: var(--text);
-                font-size: 1rem;
-              }}
-              .filters {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-              .filter-btn {{
-                padding: 8px 14px;
-                border-radius: 20px;
-                border: 1px solid var(--border);
-                background: var(--card);
-                color: var(--text);
-                cursor: pointer;
-                font-size: 0.9rem;
-                transition: 0.2s;
-              }}
-              .filter-btn.active, .filter-btn:hover {{
-                background: var(--accent);
-                border-color: var(--accent);
-                color: white;
-              }}
-              .grid {{
-                max-width: 1200px;
-                margin: 0 auto 60px;
-                padding: 0 16px;
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-                gap: 20px;
-              }}
-              .card {{
-                background: var(--card);
-                border-radius: 14px;
-                overflow: hidden;
-                border: 1px solid var(--border);
-                transition: transform 0.2s, box-shadow 0.2s;
-              }}
-              .card:hover {{
-                transform: translateY(-4px);
-                box-shadow: 0 12px 24px rgba(0,0,0,0.4);
-              }}
-              .thumb {{
-                aspect-ratio: 16/9;
-                background: #111;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                overflow: hidden;
-              }}
-              .thumb img {{ width: 100%; height: 100%; object-fit: cover; }}
-              .no-thumb {{ color: var(--muted); font-size: 0.9rem; }}
-              .info {{ padding: 14px; }}
-              .platform {{
-                font-size: 0.75rem;
-                color: var(--accent);
-                font-weight: 600;
-                margin-bottom: 6px;
-                text-transform: uppercase;
-              }}
-              h3 {{
-                font-size: 1rem;
-                margin-bottom: 12px;
-                display: -webkit-box;
-                -webkit-line-clamp: 2;
-                -webkit-box-orient: vertical;
-                overflow: hidden;
-              }}
-              .actions {{ display: flex; flex-wrap: wrap; gap: 6px; }}
-              .btn {{
-                display: inline-block;
-                padding: 6px 10px;
-                background: #222;
-                border: 1px solid var(--border);
-                border-radius: 6px;
-                color: var(--text);
-                text-decoration: none;
-                font-size: 0.8rem;
-                transition: 0.15s;
-              }}
-              .btn:hover {{ background: var(--accent); border-color: var(--accent); color: white; }}
-              .empty {{ text-align: center; padding: 80px 20px; color: var(--muted); }}
-              footer {{
-                text-align: center;
-                padding: 30px;
-                color: var(--muted);
-                font-size: 0.85rem;
-                border-top: 1px solid var(--border);
-              }}
-            </style>
-          </head>
-          <body>
-            <header>
-              <h1>Video Gallery</h1>
-              <div class="subtitle">Downloaded videos • Auto updated</div>
-            </header>
-
-            <div class="controls">
-              <input type="text" id="search" placeholder="Search videos...">
-              <div class="filters">
-                <button class="filter-btn active" data-filter="all">All</button>
-                <button class="filter-btn" data-filter="YouTube">YouTube</button>
-                <button class="filter-btn" data-filter="TikTok">TikTok</button>
-                <button class="filter-btn" data-filter="Instagram">Instagram</button>
-                <button class="filter-btn" data-filter="Twitter">Twitter</button>
-                <button class="filter-btn" data-filter="Aparat">Aparat</button>
-                <button class="filter-btn" data-filter="Vimeo">Vimeo</button>
-                <button class="filter-btn" data-filter="Other">Other</button>
-              </div>
-            </div>
-
-            <div class="grid" id="grid">
-              {cards if cards else '<div class="empty">No videos yet. Run the workflow to add some.</div>'}
-            </div>
-
-            <footer>
-              Last updated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")} • Powered by GitHub Actions
-            </footer>
-
-            <script>
-              const search = document.getElementById('search');
-              const buttons = document.querySelectorAll('.filter-btn');
-              const cards = document.querySelectorAll('.card');
-              let currentFilter = 'all';
-
-              function filter() {{
-                const q = search.value.toLowerCase().trim();
-                cards.forEach(card => {{
-                  const name = card.dataset.name;
-                  const platform = card.dataset.platform;
-                  const matchFilter = currentFilter === 'all' || platform === currentFilter;
-                  const matchSearch = !q || name.includes(q);
-                  card.style.display = (matchFilter && matchSearch) ? '' : 'none';
-                }});
-              }}
-
-              search.addEventListener('input', filter);
-              buttons.forEach(btn => {{
-                btn.addEventListener('click', () => {{
-                  buttons.forEach(b => b.classList.remove('active'));
-                  btn.classList.add('active');
-                  currentFilter = btn.dataset.filter;
-                  filter();
-                }});
-              }});
-            </script>
-          </body>
-          </html>'''
-
-          with open("videos/index.html", "w", encoding="utf-8") as f:
-              f.write(html_content)
-          print("Gallery generated successfully")
-          EOF
+          echo "Download finished"
+          ls -lh videos/
 
       - name: Stop WARP
         if: always()
-        run: docker stop warp || true && docker rm warp || true
+        run: |
+          docker stop warp || true
+          docker rm warp || true
+
+      - name: Generate Gallery
+        run: |
+          python3 << 'EOF'
+          from pathlib import Path
+
+          videos_dir = Path("videos")
+          files = list(videos_dir.glob("*.mp4")) + list(videos_dir.glob("*.webm")) + \
+                  list(videos_dir.glob("*.mkv")) + list(videos_dir.glob("*.mp3")) + \
+                  list(videos_dir.glob("*.zip"))
+
+          cards = ""
+          for f in sorted(files, key=lambda x: x.stat().st_mtime, reverse=True):
+              name = f.stem
+              thumb = None
+              for ext in [".jpg", ".webp", ".png"]:
+                  t = videos_dir / f"{name}{ext}"
+                  if t.exists():
+                      thumb = t.name
+                      break
+
+              if thumb:
+                  thumb_html = f'''
+                    <a href="{f.name}" download title="Click to download">
+                      <img src="{thumb}" alt="{name}">
+                    </a>'''
+              else:
+                  thumb_html = f'''
+                    <a href="{f.name}" download class="no-thumb">
+                      No Image - Click to Download
+                    </a>'''
+
+              cards += f'''
+              <div class="card">
+                <div class="thumb">{thumb_html}</div>
+                <div class="info">
+                  <h3>{name}</h3>
+                  <a class="btn" href="{f.name}" download>Download</a>
+                </div>
+              </div>'''
+
+          html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Gallery</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0f0f0f;
+      color: #eee;
+    }}
+    header {{
+      text-align: center;
+      padding: 30px 20px;
+      background: #1a1a1a;
+      border-bottom: 1px solid #333;
+    }}
+    h1 {{ margin: 0 0 8px 0; }}
+    .grid {{
+      max-width: 1100px;
+      margin: 30px auto;
+      padding: 0 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 20px;
+    }}
+    .card {{
+      background: #1a1a1a;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid #333;
+      transition: transform 0.2s;
+    }}
+    .card:hover {{ transform: translateY(-4px); }}
+    .thumb {{
+      aspect-ratio: 16/9;
+      background: #111;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }}
+    .thumb a {{ display: block; width: 100%; height: 100%; }}
+    .thumb img {{
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transition: 0.3s;
+      cursor: pointer;
+    }}
+    .thumb img:hover {{ transform: scale(1.03); opacity: 0.9; }}
+    .no-thumb {{
+      color: #aaa;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      text-decoration: none;
+    }}
+    .info {{ padding: 14px; }}
+    h3 {{
+      margin: 0 0 12px 0;
+      font-size: 1rem;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }}
+    .btn {{
+      display: inline-block;
+      padding: 8px 14px;
+      background: #3b82f6;
+      color: white;
+      text-decoration: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+    }}
+    .btn:hover {{ background: #2563eb; }}
+    .empty {{
+      text-align: center;
+      padding: 80px 20px;
+      color: #777;
+      grid-column: 1 / -1;
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>YouTube Gallery</h1>
+    <div>Click on the image to download</div>
+  </header>
+  <div class="grid">
+    {cards if cards else '<div class="empty">No videos yet.</div>'}
+  </div>
+</body>
+</html>'''
+
+          with open("videos/index.html", "w", encoding="utf-8") as f:
+              f.write(html)
+          print("Gallery created")
+          EOF
 
       - name: Commit & Push
         run: |
-          git add -f videos/
-          if git diff --cached --quiet; then
-            echo "No changes"
-            exit 0
-          fi
-          git commit -m "Update videos and gallery [skip ci]"
-          git push origin HEAD:${{ github.ref_name }}
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add videos/
+          git diff --cached --quiet || git commit -m "Add downloaded videos"
+          git push
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
-
-      - name: Upload artifact
+      - name: Deploy to GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
           path: videos
 
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - name: Deploy
         uses: actions/deploy-pages@v4
