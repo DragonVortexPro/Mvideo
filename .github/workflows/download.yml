@@ -19,7 +19,7 @@ on:
           - 480
           - audio
       password:
-        description: "Zip password (optional - leave empty for no password)"
+        description: "Zip password (optional)"
         required: false
         default: ""
         type: string
@@ -106,7 +106,6 @@ jobs:
               "$URL" || echo "Failed: $URL"
           done
 
-          # Zip with password if provided
           if [ -n "$PASSWORD" ]; then
             echo "Creating password protected zips..."
             cd videos
@@ -129,130 +128,59 @@ jobs:
 
       - name: Generate Gallery
         run: |
-          python3 << 'EOF'
+          python3 -c '
           from pathlib import Path
 
           videos_dir = Path("videos")
-          files = list(videos_dir.glob("*.mp4")) + list(videos_dir.glob("*.webm")) + \
-                  list(videos_dir.glob("*.mkv")) + list(videos_dir.glob("*.mp3")) + \
-                  list(videos_dir.glob("*.zip"))
+          files = list(videos_dir.glob("*.mp4")) + list(videos_dir.glob("*.webm")) + list(videos_dir.glob("*.mkv")) + list(videos_dir.glob("*.mp3")) + list(videos_dir.glob("*.zip"))
 
           cards = ""
           for f in sorted(files, key=lambda x: x.stat().st_mtime, reverse=True):
               name = f.stem
               thumb = None
               for ext in [".jpg", ".webp", ".png"]:
-                  t = videos_dir / f"{name}{ext}"
+                  t = videos_dir / (name + ext)
                   if t.exists():
                       thumb = t.name
                       break
 
               if thumb:
-                  thumb_html = f'''
-                    <a href="{f.name}" download title="Click to download">
-                      <img src="{thumb}" alt="{name}">
-                    </a>'''
+                  thumb_html = f"<a href=\"{f.name}\" download title=\"Click to download\"><img src=\"{thumb}\" alt=\"{name}\"></a>"
               else:
-                  thumb_html = f'''
-                    <a href="{f.name}" download class="no-thumb">
-                      No Image - Click to Download
-                    </a>'''
+                  thumb_html = f"<a href=\"{f.name}\" download class=\"no-thumb\">No Image - Click to Download</a>"
 
-              cards += f'''
+              cards += f"""
               <div class="card">
                 <div class="thumb">{thumb_html}</div>
                 <div class="info">
                   <h3>{name}</h3>
                   <a class="btn" href="{f.name}" download>Download</a>
                 </div>
-              </div>'''
+              </div>"""
 
-          html = f'''<!DOCTYPE html>
+          html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>YouTube Gallery</title>
   <style>
-    body {{
-      margin: 0;
-      font-family: system-ui, sans-serif;
-      background: #0f0f0f;
-      color: #eee;
-    }}
-    header {{
-      text-align: center;
-      padding: 30px 20px;
-      background: #1a1a1a;
-      border-bottom: 1px solid #333;
-    }}
+    body {{ margin: 0; font-family: system-ui, sans-serif; background: #0f0f0f; color: #eee; }}
+    header {{ text-align: center; padding: 30px 20px; background: #1a1a1a; border-bottom: 1px solid #333; }}
     h1 {{ margin: 0 0 8px 0; }}
-    .grid {{
-      max-width: 1100px;
-      margin: 30px auto;
-      padding: 0 16px;
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-      gap: 20px;
-    }}
-    .card {{
-      background: #1a1a1a;
-      border-radius: 12px;
-      overflow: hidden;
-      border: 1px solid #333;
-      transition: transform 0.2s;
-    }}
+    .grid {{ max-width: 1100px; margin: 30px auto; padding: 0 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }}
+    .card {{ background: #1a1a1a; border-radius: 12px; overflow: hidden; border: 1px solid #333; transition: transform 0.2s; }}
     .card:hover {{ transform: translateY(-4px); }}
-    .thumb {{
-      aspect-ratio: 16/9;
-      background: #111;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-    }}
+    .thumb {{ aspect-ratio: 16/9; background: #111; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
     .thumb a {{ display: block; width: 100%; height: 100%; }}
-    .thumb img {{
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      transition: 0.3s;
-      cursor: pointer;
-    }}
+    .thumb img {{ width: 100%; height: 100%; object-fit: cover; transition: 0.3s; cursor: pointer; }}
     .thumb img:hover {{ transform: scale(1.03); opacity: 0.9; }}
-    .no-thumb {{
-      color: #aaa;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 100%;
-      text-decoration: none;
-    }}
+    .no-thumb {{ color: #aaa; display: flex; align-items: center; justify-content: center; height: 100%; text-decoration: none; }}
     .info {{ padding: 14px; }}
-    h3 {{
-      margin: 0 0 12px 0;
-      font-size: 1rem;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }}
-    .btn {{
-      display: inline-block;
-      padding: 8px 14px;
-      background: #3b82f6;
-      color: white;
-      text-decoration: none;
-      border-radius: 6px;
-      font-size: 0.9rem;
-    }}
+    h3 {{ margin: 0 0 12px 0; font-size: 1rem; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }}
+    .btn {{ display: inline-block; padding: 8px 14px; background: #3b82f6; color: white; text-decoration: none; border-radius: 6px; font-size: 0.9rem; }}
     .btn:hover {{ background: #2563eb; }}
-    .empty {{
-      text-align: center;
-      padding: 80px 20px;
-      color: #777;
-      grid-column: 1 / -1;
-    }}
+    .empty {{ text-align: center; padding: 80px 20px; color: #777; grid-column: 1 / -1; }}
   </style>
 </head>
 <body>
@@ -261,15 +189,15 @@ jobs:
     <div>Click on the image to download</div>
   </header>
   <div class="grid">
-    {cards if cards else '<div class="empty">No videos yet.</div>'}
+    {cards if cards else "<div class=\"empty\">No videos yet.</div>"}
   </div>
 </body>
-</html>'''
+</html>"""
 
           with open("videos/index.html", "w", encoding="utf-8") as f:
               f.write(html)
           print("Gallery created")
-          EOF
+          '
 
       - name: Commit & Push
         run: |
